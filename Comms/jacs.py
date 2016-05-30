@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 """
-GNU License? MIT License? ... 
+Licensed under MIT (../LICENSE)
 
 JACS.py - Just Another Communications Script
 
@@ -16,13 +16,12 @@ The program implements control over:
         - Through Rudics.
 
 A configuration file is used containing the following setup:
-  - MTU packet size: MTU
+  - MTU packet size: MTU (For data MTU<7kB, SBD MTU<340B)
   - Operation mode: OM [0] Raw, [1] SBD, [2] PPP-FTP, [3] Rudics.
   - Temp folder path: TF '/home/satice/new/temp'
   - Origin folder of the data to be transfered: OF
 
 V0. Raul Bardaji & Oriol Sanchez, ICM-CSIC
-Go binary.
 """
 import fox #Access to the GPIO of the PCB to power the modem, import hardware library of your device (i.e. Raspberry Pi)
 import time #Used to create sleeps
