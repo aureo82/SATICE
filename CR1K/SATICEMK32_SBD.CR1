@@ -1,0 +1,652 @@
+' Campbell Scientific CR1000 Logger;
+' Programmed in CRBASIC 
+'
+' V0 Shane Rodwell, SAMS, 2010, 2011
+' V1 Oriol Sanchez, April 2015
+' V2 Oriol Sanchez, May 2016
+' SATICE Project: Freeboard System (FBS) data logging and transfer to Data Management Unit (DMU)
+'
+' Objective:
+' Take hourly SDI12 measurements from a CS456-14(SET to 14.PSIG?) pressure sensor, a SR50A
+' Snow Depth Sensor and a WXT520 Weather Transmitter.
+' Take hourly analog measurements of system votages and temperatures.
+' Log values hourly, and on each hour form a CSV string from logged values.
+' Transfer resultant CSV string to DMU upon request.
+' LVD control added March 2012
+' Mini CT added April 2012
+' CS455 updated to CS456 April 2015
+' Inverted power control for ARM (Now controled through a NC SSRelay) April 2015
+' Added support for SBD TX/Rx with incoming decodification May 2016
+' Added normal and burn mode to input messages to set the system into a minute rate
+' sending message operation.
+'
+'Ports set as follows:
+'SE1 - Battery Box 1 (ANALOG)
+'SE2 - Battery Box 2 (ANALOG)
+'SE3 - Battery Box 3 (ANALOG)--- TBR APRIL2015
+'SE4 - Battery Box 4 (ANALOG)--- TBR APRIL2015
+'
+'C1 - AWS (SDI12)
+'C2	-
+'C3 - SLS (SDI12)
+'C4 - SBD on/off control (LOGIC)
+'C5 - SDS (SDI12)
+'C6 - ARM on/off control (LOGIC)
+'C7 - ARM comms TX (3V3 TTL Serial)
+'C8 - ARM comms RX (3V3 TTL Serial)
+'
+'ComRS232 - MiniCT sensor (RS232)
+'ComME - SBD modem comms (RS232)
+'
+'SW-12 - 12V on off to FBS sensors (POWER)
+'----------------------------------------------------------------------------------------------------
+'Define Data Tables
+'----------------------------------------------------------------------------------------------------
+'SDS Variables
+Public SR50RAW(2)
+Alias SR50RAW(1) = SDSRaw
+Alias SR50RAW(2) = SDSQuality
+Public SDSTempCorrected, SDSFailCounter
+
+'SLS Variables
+Public CS456RAW(2)
+Alias CS456RAW(1) = SLSLevel
+Alias CS456RAW(2) = SLSTemp
+
+'MiniCT Variables
+Public MiniCTrx As String *50
+Public CTrxSplit(2) As String * 50
+Alias CTrxSplit(1) = CTtemp
+Alias CTrxSplit(2) = CTconductivity
+
+'APS Variables
+Public WXT520RAW(15)
+Alias WXT520RAW(1)=APSWdmin 'Minimum Wind Direction
+Alias WXT520RAW(2)=APSWdavg 'Avg Wind Direction
+Alias WXT520RAW(3)=APSWdmax 'Maxiumum Wind Direction
+Alias WXT520RAW(4)=APSWsmin 'Minimum Wind Speed
+Alias WXT520RAW(5)=APSWsavg 'Average Wind Speed
+Alias WXT520RAW(6)=APSWsmax 'Maximum Wind Speed
+Alias WXT520RAW(7)=APSairtemp 'Air Temperature
+Alias WXT520RAW(8)=APSrelhumidity 'Relative Humidity
+Alias WXT520RAW(9)=APSairpressure 'Air Pressure
+Alias WXT520RAW(10)=APSRamount 'Amount of Rain
+Alias WXT520RAW(11)=APSRduration 'Rain Duration
+Alias WXT520RAW(12)=APSRintensity 'Rain Intensity
+Alias WXT520RAW(13)=APSHamount 'Amount of Hail
+Alias WXT520RAW(14)=APSHduration 'Hail Duration
+Alias WXT520RAW(15)=APSHintensity
+
+'HouseKeeping Variables
+Public CR1000_Temp
+Public CR1000_Volts
+Public PWS_BB1
+Public PWS_BB2
+Public PWS_BB3 '--- TBR APRIL2015, removal of this variables means change in server decoding system.
+Public PWS_BB4 '--- TBR APRIL2015, not duable to current deployment commitments.
+
+'Data Transfer Variables
+Public CR1000_TX_String As String * 500 'String to be transmitted to DMU
+Public DMU_RX_String As String * 500 'String received from DMU
+Public DMU_GPS(2) As String * 200 'String received from DMU
+Public GPSmsg As String * 200
+Public dataArray0(17) 'dataArray0 holds FBS data before it is turned into a string.
+Public dataArray1(6)  'dataArray1 holds HouseKeeping data until it is turned into a string
+Public strArray0(23) As String ' strArray holds all of the text formatted data points to be moved to the transmit string.
+
+'Program Vars
+Const CRnumeric=13
+Const CRLF=CHR(13)+CHR(10) 'Carriage Return
+Dim i
+Public DMU_dumb 'fail counter for lost DMU <> CR1000 comms link
+Public MINUTE_MODE As Boolean 'Flag set for SBD mode
+Public FBS_HOURLY As Boolean 'Flag set for SBD mode
+Public DEFAULT As Boolean ''Flag set for SBD mode
+Public LVDisconnect As Boolean 'Flag to log state of LVD
+Public LVDCount
+
+' SBD Vairables
+Public csq, timeout
+Const  RXBufSize=300
+Public RXstr As String *300
+Public RXfrags(7) As String *10
+Public flag(3) As Boolean
+Public TXStr As String *200
+Public RX_Message(2) As String *50
+Public MO_Status, MT_Status
+Public GPS_SBD(10) As String * 100
+
+'----------------------------------------------------------------------------------------------------
+'Define Data Tables
+'----------------------------------------------------------------------------------------------------
+' FBS Data Requested by DMU
+DataTable (FBSData,TRUE,1)
+	'Weather data
+	Sample (1,APSWdmin,FP2)
+	Sample (1,APSWdavg,FP2)
+	Sample (1,APSWdmax,FP2)
+	Sample (1,APSWsmin,FP2)
+	Sample (1,APSWsavg,FP2)
+	Sample (1,APSWsmax,FP2)
+	Sample(1,APSairtemp,FP2)
+	Sample(1,APSrelhumidity,FP2)
+	Sample(1,APSairpressure,IEEE4)
+	'SDS Sensor
+	Sample(1,SDSRaw,FP2)
+	Sample(1,SDSTempCorrected, FP2)
+	Sample(1,SDSQuality,FP2)
+	Maximum(1,SDSFailCounter,FP2,False,0)
+	'SLS Sensor
+	Sample (1,SLSLevel,IEEE4)
+	Sample (1,SLSTemp, FP2)
+	'CT Sensor
+	Sample (1,CTtemp,IEEE4)
+	Sample (1,CTconductivity, IEEE4)
+EndTable
+
+'Housekeeping or Engineering Data Requested by DMU
+DataTable (HouseKeepingData, TRUE,1)
+	Average (1, CR1000_Temp, FP2, FALSE)
+	Average (1, CR1000_Volts, FP2, FALSE)
+	Average (1, PWS_BB1, FP2, FALSE)
+	Average (1, PWS_BB2, FP2, FALSE)
+	Average (1, PWS_BB3, FP2, FALSE)'--- TBR APRIL2015
+	Average (1, PWS_BB4, FP2, FALSE)'--- TBR APRIL2015
+EndTable
+
+'----------------------------------------------------------------------------------------------------
+' Program Subroutines
+'----------------------------------------------------------------------------------------------------
+
+' ***************************************************************************************************
+' Housekeeping
+' ***************************************************************************************************
+Sub GetHousekeeping
+
+	PanelTemp (CR1000_Temp,250)
+	Battery (CR1000_Volts)
+
+	'Measure votages across pot divider 100/390k
+	'Note Multiplier is in command, param 8, if you need to add change...
+	'
+
+	VoltSe (PWS_BB1,1,mv5000,1,1,0,250,.00505,0)
+	VoltSe (PWS_BB2,1,mV5000,2,1,0,250,.00502,0)
+	VoltSe (PWS_BB3,1,mv5000,3,1,0,250,.00505,0)'--- TBR APRIL2015
+	VoltSe (PWS_BB4,1,mv5000,4,1,0,250,.00505,0)'--- TBR APRIL2015
+
+EndSub
+
+
+' ***************************************************************************************************
+' Get Snow Depth
+' ***************************************************************************************************
+Sub GetSDS
+
+	Do
+		SDI12Recorder(SDSRaw,5, 0, "M1!",-1, 0)
+		' SR50A returns -99999 if it gets a bad reading
+		' occasional returned values of 0 (or more) = bad reading
+		If SDSRaw >= 0 Then SDSRaw = -9999
+		If SDSRaw > -1000 Then ' Anything else considered a good reading so:
+			SDSTempCorrected = SDSRaw * (SQR((APSairtemp+273.15)/273.15)) 'Apply temp correction
+			SDSFailCounter = 0 'Reset the fail counter
+			ExitDo
+		Else
+			SDSFailCounter = SDSFailCounter + 1 'Increment the fail counter
+		EndIf
+	Loop Until SDSFailCounter = 20
+
+	If SDSFailCounter = 20 Then 'Give up after 10 attempts and log -9999 in data.
+		SDSRaw = -99999
+		SDSTempCorrected = -9999
+		SDSFailCounter = 0
+	EndIf
+
+EndSub
+
+' ***************************************************************************************************
+' APS Readings
+' ***************************************************************************************************
+Sub GetAPS
+
+	'WXT520 SDI-12 Sensor measurements 1-6 ( Wind Speed and Wind direction measurements ):
+	SDI12Recorder(WXT520RAW(1),1,5,"M1!",1,0)
+	'WXT510 SDI-12 Sensor measuements 7-9 ( Air Temperature, Relative Humidity and Air pressure measurements ):
+	SDI12Recorder(WXT520RAW(7),1,5,"M2!",1,0)
+	'WXT510 SDI-12 Sensor measurements 10-15 ( Rain and hail measurements ):
+	SDI12Recorder(WXT520RAW(10),1,5,"M3!",1,0)
+
+EndSub
+
+' ***************************************************************************************************
+' APS Readings, instead of APS it is SLS
+' ***************************************************************************************************
+Sub GetSLS
+
+	SDI12Recorder (CS456RAW(),3,0,"M!",1.0,0)
+	SLSLevel = SLSLevel * (2.31 * 12 * 2.54) / 100
+	'For sake of understanding the measurement:
+	'Sensor reads in psig, then 2.31ft(WC)/psig*12inches(WC)/ft(WC)*2.54cm(WC)/inch(WC)*1m(WC)/100cm(WC) = meter(WC)
+
+	'	' for shane test, no sensor
+	'	SLSLevel = 10
+	'	SLSTemp = 99
+
+EndSub
+
+Sub GetCT
+
+	SerialClose(ComRS232)
+	Delay(1,10,Sec)
+
+	'Open and flush the RS232 port, standard RS232 format
+	SerialOpen(ComRS232,19200,3,0,500)
+
+	'Wait 2 seconds, then clear the buffer
+	Delay(1,2, sec)
+	SerialFlush(ComRS232)
+
+	'Read in serial data up until CRLF. First read is rejected and overwritten to ensure full string (CRLF to CRLF) is recieved.
+	SerialIn(MiniCTrx,ComRS232,100,CRLF,500)
+	SerialIn(MiniCTrx,ComRS232,100,CRLF,500)
+
+	'Split the string into T and C ready for logging
+	SplitStr (CTrxSplit,MiniCTrx," ",2,0)
+
+	'Close the port
+	SerialClose(ComRS232)
+	Delay(1,1,sec)
+
+EndSub
+
+
+' ***************************************************************************************************
+' changes floating point data to strings. Ready to send via iridium
+'
+' PWS_BB3 and PWS_BB4 should de removed, they are not removed to maintain data structure of the fbs
+' on the server
+'
+' ***************************************************************************************************
+Sub makeCSVstring
+
+	CR1000_TX_string ="" ' clear string used to transmit data
+
+	strArray0(1)=FormatFloat(dataArray0(1),"%03.1f") 'APSWdmin
+	strArray0(2)=FormatFloat(dataArray0(2),"%03.1f") 'APSWdavg
+	strArray0(3)=FormatFloat(dataArray0(3),"%03.1f") 'APSWdmax
+	strArray0(4)=FormatFloat(dataArray0(4),"%03.1f") 'APSWsmin
+	strArray0(5)=FormatFloat(dataArray0(5),"%03.1f") 'APSWsavg
+	strArray0(6)=FormatFloat(dataArray0(6),"%03.1f") 'APSWsmax
+
+	strArray0(7)=FormatFloat(dataArray0(7),"%03.1f") 'APSTa
+	strArray0(8)=FormatFloat(dataArray0(8),"%03.1f") 'APSRH
+	strArray0(9)=FormatFloat(dataArray0(9),"%04.1f") 'APSPa
+
+	strArray0(10)=FormatFloat(dataArray0(10),"%02.2f") 'SDSRaw
+	strArray0(11)=FormatFloat(dataArray0(11),"%02.2f") 'SDSTempCorrected
+	strArray0(12)=FormatFloat(dataArray0(12),"%03.0f") 'SDSQuality
+	strArray0(13)=FormatFloat(dataArray0(13),"%02.0f") 'SDSFailCounter
+
+	strArray0(14)=FormatFloat(dataArray0(14),"%02.3f") 'SLSLevel
+	'SLS was set to %02.2f, thus to decimeters instead of milimeters.
+	strArray0(15)=FormatFloat(dataArray0(15),"%02.2f") 'SLSTemp
+
+	strArray0(16)=FormatFloat(dataArray1(1),"%02.2f") 'CR1000Temp
+	strArray0(17)=FormatFloat(dataArray1(2),"%02.2f") 'CR1000Volts
+	strArray0(18)=FormatFloat(dataArray1(3),"%02.2f") 'PWS_BB1
+	strArray0(19)=FormatFloat(dataArray1(4),"%02.2f") 'PWS_BB2
+	strArray0(20)=FormatFloat(dataArray1(5),"%02.2f") 'PWS_BB3
+	strArray0(21)=FormatFloat(dataArray1(6),"%02.2f") 'PWS_BB4
+	strArray0(22)=FormatFloat(dataArray0(16),"%02.2f") 'CTtemp
+	strArray0(23)=FormatFloat(dataArray0(17),"%02.3f") 'CTconductivity
+
+	'Separates data with commas.
+	For i = 1 To 23
+		CR1000_TX_String = CR1000_TX_String + strArray0(i)
+		CR1000_TX_String = CR1000_TX_String + " "
+	Next i
+
+EndSub
+
+' ***************************************************************************************************
+' Power cycle ARM
+' ***************************************************************************************************
+' The new DCDC regulators don't have enable pin, thus enable is done through a normally close SSRelay
+' Meaning that if control signal is 0 the DCDC regulators are working, if control signal is 1 the DCDC
+' regulators are shutdown. Thus PortSet is inverted for power cycle.
+Sub ARM_Reset
+	PortSet (6,1) 'disable 12V input of DCDC switching regulators low
+	Delay (1,30,Sec)
+	PortSet (6,0) 'enable 12V input of DCDC switching regulators high
+EndSub
+
+'----------------------------------------------------------------------------------------------------
+' Get CSQ from Iridium
+'----------------------------------------------------------------------------------------------------
+Sub SignalQuality
+
+	'9601/2 Settings:  E0 Q0 V1 D0 K0
+	'AT+SBDREG? to tell if system is registered, a 2 as answer means is registered.
+
+	Flag(1)=FALSE 'Clear CSQ flag
+	SerialOpen(COMME,19200,3,0,500)
+	Delay(0,3,sec)
+	For i = 1 To 10
+		timeout = 0
+		SerialFlush(ComME)
+		SerialOut(ComME,"AT+CSQ"+CRLF,"",0,0)
+		SerialFlush(ComME)
+		SerialIn(RXStr,ComME,6000,CRnumeric,RXBufSize)
+		While Len(RXstr)<4
+			Delay(0,3,sec)
+			SerialIn(RXStr,ComME,100,CRnumeric,RXBufSize) 'reject short responses such as OK and CRLF
+			timeout = timeout + 1
+			If timeout = 10 Then RXStr="+CSQ:0" 'I am getting stuck here
+		Wend
+		SplitStr(RXfrags,RXStr,",:",2,7)
+		csq=RXfrags(2)
+
+		If csq<3 Then
+			Delay(0,30,sec)
+		Else
+			Flag(1)=TRUE
+			ExitFor
+		EndIf
+	Next
+	SerialClose(ComME)
+EndSub
+
+'----------------------------------------------------------------------------------------------------
+' Inititiates SBD session
+'----------------------------------------------------------------------------------------------------
+Sub SBD_Session
+
+	SerialOpen(ComME,19200,3,0,500)
+	SerialFlush(ComME)
+
+	'Writes Transmit String to the modem
+	SerialOut(ComME,"AT+SBDWT="+TXstr+CRLF,"",0,1000) 'should uncommment it
+	Delay(0,3,sec)
+	SerialFlush(ComME)
+
+	'Increased tries from 5 to 10(also timeout), due to poor performance of Iridium Network
+	For i = 1 To 10
+		timeout = 0
+
+		'Initiate Short Burst Data session.
+		SerialOut(ComME,"AT+SBDI"+CRLF,"",0,1000)
+		
+		Delay(0,3,sec)
+		SerialIn(RXStr,ComME,6000,CRnumeric,RXBufSize)
+		'SerialIn(RXStr,ComME,6000,CRnumeric,RXBufSize)
+		While Len(RXstr)<8
+			Delay(0,10,sec)
+			SerialIn(RXStr,ComME,6000,CRnumeric,RXBufSize) 'reject short responses such as OK and CRLF
+			timeout = timeout + 1
+			If timeout = 10 Then RXStr="+SBDIX:3,0,0,0,0,0"
+		Wend
+		SplitStr(RXfrags,RXStr,",:",7,7)
+		MO_Status=RXfrags(2)
+		MT_Status=RXfrags(4)
+
+		If MT_status >= 1 Then
+			For i = 1 To 10
+				SerialOut(ComME,"AT+SBDRT"+CRLF,"",0,0)
+				Delay(0,1,sec)
+				SerialIn(RXStr,ComME,6000,"!",RXBufSize)
+				'Split in two fields of type string
+				SplitStr(RX_message,RXStr,"*!",2,5)			
+				If RX_Message(2) <> "" Then 
+					ExitFor
+				EndIf
+			Next
+
+		EndIf
+
+		If MO_Status <=  1 Then
+			ExitFor
+		Else
+			Delay(0,10,sec)
+		EndIf
+	Next
+
+	
+	'---------------------------GET READY FOR SAFE POWER DOWN MODEM
+	'Good practice would be to clean In/Out buffers on the modem once variables have been delivered
+	'to network or received by CR1k...
+	SerialOut(ComME,"AT+SBDD2"+CRLF,"",0,1000) 'clear Mobile Originated and Terminated Buffer
+	'At his point, contents of modem MO and MT Buffer should already be inside CR1k local variables 
+	Delay(0,1,sec)
+	SerialOut(ComME,"AT*F"+CRLF,"",0,0) 'Flush pending writes to eeprom for safe power down.
+	Delay(0,1,sec)
+	SerialFlush(ComME)
+	SerialClose(ComME)
+	
+	'---------------------------PROCESS INCOMMING MESSAGES
+	'Incoming message format: *RESET!, *FBS!, *DEFAULT!
+	'Decode recieved message (if any)
+	If RX_Message(2) <> "" Then
+		If RX_Message(2) = "RESET" Then
+			Call ARM_Reset
+		ElseIf RX_Message(2) = "FBS" Then
+			FBS_HOURLY = TRUE
+			DEFAULT = FALSE
+		ElseIf RX_Message(2) = "DEFAULT" Then
+			FBS_HOURLY = FALSE
+			DEFAULT = TRUE
+		ElseIf RX_Message(2) = "BURN" Then  'Added for burn mode, from	
+			MINUTE_MODE = TRUE
+		ElseIf RX_Message(2) = "NORMAL" Then	
+			MINUTE_MODE = FALSE				'Added for burn mode, to
+		EndIf
+		RX_Message(2) = ""
+	EndIf
+
+	flag(1) = false
+EndSub
+
+'----------------------------------------------------------------------------------------------------
+' Set state of LVD flag upont state of batteries
+' Updated for MK3 by removing PWS_BB3 and PWS_BB4
+'----------------------------------------------------------------------------------------------------
+Sub LVDmonitor
+
+	'if ALL of the input battery boxes are below 11.0V increment the LVD counter
+	'Mark 3 only uses to PWS, thus BB3 and BB4 are not required, anyway the logical statement
+	'does not care if there are only two power units as it will only count LVD when all units are under 11
+	'If PWS_BB1 <= 10.0 AND PWS_BB2 <= 10.0 AND PWS_BB3 <= 10.0 AND PWS_BB4 <= 10.0 Then
+	If PWS_BB1 <= 10.0 AND PWS_BB2 <= 10.0 Then 'Updated for MK3
+
+		LVDCount = LVDCount + 1
+	EndIf
+	'If ANY box recovers momentarily, reset the LVD counter
+	'If PWS_BB1 >= 10.5 OR PWS_BB2 >= 10.5 OR PWS_BB3 >= 10.5 OR PWS_BB4 >= 10.5 Then
+	If PWS_BB1 >= 10.5 OR PWS_BB2 >= 10.5 Then 'Updated for MK3
+
+		LVDCount = 0
+	EndIf
+
+	'if 50 Consecutive drops in battery voltages below 11.2V then power off the ARM
+	If LVDCount = 50
+		LVDisconnect = TRUE 		'set LVD flag true
+		DEFAULT = TRUE				'set SBD comms status to default (24hours)
+		PortSet(6,1) 				'turn off the ARM, port set should be 1 because power is controlled through a NC SSRelay.
+		LVDCount = 0
+	EndIf
+
+	'if ANY of the input battery voltages are above 12.5V
+	'If PWS_BB1 >= 12 OR PWS_BB2 >= 12 OR PWS_BB3 >= 12 OR PWS_BB4 >= 12 Then
+	If PWS_BB1 >= 12 OR PWS_BB2 >= 12 Then 'Updated for MK3
+		LVDisconnect = FALSE		'set the LVD flag false
+		LVDCount = 0
+		PortSet(6,0)				'turn on the ARM, port set should be 0 because power is controlled through a NC SSRelay
+	EndIf
+
+EndSub
+
+
+
+' ***************************************************************************************************
+' Main Prog
+' ***************************************************************************************************
+
+BeginProg
+	PortSet (6,0)      		'Turn on the ARM, Controlled through a SSRelay Normally Closed thus a 0 means power to the DCDC
+	PortSet (4,0)           'Turn off the SBD
+	DEFAULT = TRUE			'Set Default SBD tx/rx status
+	FBS_HOURLY = FALSE	    'Set Default SBD tx/rx status
+	MINUTE_MODE = FALSE 	'Set Minute_mode to false, only used for test (set it as true through PC200W)
+	Flag(1) = False  		'CSQ success flag
+	LVDisconnect = FALSE	'Default LVD status on power up is ARM turned on
+	LVDCount = 0 			'Init LVDCount
+	SW12(0)
+	Scan (30,sec,0,0)
+
+		Call GetHouseKeeping
+		Call LVDMonitor
+		'****************************************************************************** BATTERIES OK
+		If LVDisconnect = FALSE Then			'if batteries okay then run through FBS program as normal
+
+			If TimeIntoInterval (0,1,Hr) Then DMU_dumb = DMU_dumb + 1 
+			'TIMEOUT COMMUNICATION WITH DMU, HOURLY INCREASES VALUE, KILLS THE COUNTER EVERY CYCLE u CAN TALK WITH THE DMU
+
+			'Peform FBS Measurements when requested by DMU
+			SerialOpen(Com4,9600,19,0,500)
+			SerialIn  (DMU_RX_String, Com4, 160,"!", 160)	
+			If DMU_RX_String = "DATA_PLEASE!" Then		'Reading timing done by DMU queries
+				DMU_RX_String = ""	'Clean RX Buffer
+				SW12(1) 'Turn on power to sensors
+				Call GetAPS
+				Call GetSDS
+				Call GetSLS
+				Call GetCT
+				SW12(0) 'Turn off power to sensors
+				CallTable FBSData
+				CallTable HouseKeepingData
+
+				If (FBSData.output(1,1)=true) Then
+					GetRecord(dataArray0,FBSData,1)
+				EndIf
+				If (HouseKeepingData.output(1,1)=true) Then
+					GetRecord(dataArray1,HouseKeepingData,1)
+				EndIf
+
+				Call MakeCSVString
+				SerialOut (Com4, CR1000_TX_String,"",0,100)
+				SerialFlush(com4)
+				'	SerialClose(Com4) 'Why commented, I am opening the port every cycle therefore I should close it
+				DMU_dumb = 0
+			EndIf
+
+			SplitStr (DMU_GPS(),DMU_RX_String,":",2,7)
+			SplitStr (GPS_SBD(),DMU_GPS(2)," ",9,7)
+
+			If DMU_GPS(1) = " GPS" Then GPSmsg = GPS_SBD(1)+ " " + GPS_SBD(2) + " " + GPS_SBD(4)
+			'If DMU_GPS(1) = " GPS" Then GPSmsg = DMU_GPS(2)
+
+			'Silence from ARM for X hours then keep logging FBS
+			If TimeIntoInterval(0,1,Hr) AND DMU_dumb > 2 Then 'Keep logging HOURLY in the CR1k case DMU is off.
+				SW12(1)
+				Call GetAPS
+				Call GetSDS
+				Call GetSLS
+				Call GetCT
+				SW12(0)
+				CallTable FBSData
+				CallTable HouseKeepingData
+			EndIf
+
+			'****************************************************************************** HOURLY UPDATE
+			If TimeIntoInterval(0,1,Hr) AND FBS_HOURLY = TRUE AND MINUTE_MODE=FALSE Then 'HOURLY CYCLE !!!!
+			'Once an hour a short message is created and beamed through the SBD 
+	
+			'DataArray0 is the data array for external sensor payload
+				If (FBSData.output(1,1)=true) Then
+					GetRecord(dataArray0,FBSData,1)
+				EndIf
+				
+			'DataArray1 is the data array for the DMU data input
+				If (HouseKeepingData.output(1,1)=true) Then
+					GetRecord(dataArray1,HouseKeepingData,1)
+				EndIf
+				
+			'Build a CSV string to send the message.
+				Call MakeCSVString
+			'Add last GPS position from the DMU
+				TXstr = CR1000_TX_string + "," + GPSmsg
+				DMU_GPS() = ""
+				PortSet(4,1) 'Wake up modem
+				Call Signalquality
+				'If coverage>2 then I'll send the message
+				If flag(1)=TRUE Then
+					Call SBD_session
+				EndIf
+				PortSet(4,0) 'Sleep modem
+				Delay(0,5,sec)
+			EndIf
+			
+			'******************************************************************************BURN IN MODE: HOURLY MESSAGE
+			If TimeIntoInterval(0,1,Min) AND FBS_HOURLY = TRUE AND MINUTE_MODE=TRUE Then 
+			'Once an hour a short message is created and beamed through the SBD 
+	
+			'DataArray0 is the data array for external sensor payload
+				If (FBSData.output(1,1)=true) Then
+					GetRecord(dataArray0,FBSData,1)
+				EndIf
+				
+			'DataArray1 is the data array for the DMU data input
+				If (HouseKeepingData.output(1,1)=true) Then
+					GetRecord(dataArray1,HouseKeepingData,1)
+				EndIf
+				
+			'Build a CSV string to send the message.
+				Call MakeCSVString
+			'Add last GPS position from the DMU
+				TXstr = CR1000_TX_string + "," + GPSmsg
+				DMU_GPS() = ""
+				PortSet(4,1) 'Wake up modem
+				Call Signalquality
+				'If coverage>2 then I'll send the message
+				If flag(1)=TRUE Then
+					Call SBD_session
+				EndIf
+				PortSet(4,0) 'Sleep modem
+				Delay(0,5,sec)
+			EndIf
+			
+			
+			
+			
+		EndIf
+		'**************************************************************************** ONCE EVERY 24hours Message
+		'Default daily SBD tran smission / message reciept check
+		If TimeIntoInterval(0,24,Hr) AND DEFAULT = TRUE AND MINUTE_MODE = FALSE Then 
+			'Default string to send back is basic housekeep data i.e. Logger Temp and Batt and last GPS position from DMU (GPSmsg), useful in LVD mode....
+			TXstr = FormatFloat(CR1000_Temp,"%02.2f") + "," + FormatFloat(CR1000_Volts,"%02.2f") + "," + FormatFloat(PWS_BB1,"%02.2f") + "," + FormatFloat(PWS_BB2,"%02.2f") + "," + GPSmsg
+			PortSet(4,1) 'Wake up modem
+			Call Signalquality
+			If flag(1)=TRUE Then
+				Call SBD_session
+			EndIf
+			PortSet(4,0) 'Sleep modem
+			Delay(0,5,sec)
+		EndIf
+		
+		
+		'****************************************************************************** BURN IN MODE: ONCE EVERY 24H Message
+		If TimeIntoInterval(0,1,Min)  AND DEFAULT = TRUE AND MINUTE_MODE = TRUE Then
+			'Default string to send back is basic housekeep data i.e. Logger Temp and Batt and last GPS position from DMU (GPSmsg), useful in LVD mode....
+			TXstr = FormatFloat(CR1000_Temp,"%02.2f") + "," + FormatFloat(CR1000_Volts,"%02.2f") + "," + FormatFloat(PWS_BB1,"%02.2f") + "," + FormatFloat(PWS_BB2,"%02.2f") + "," + GPSmsg
+			PortSet(4,1) 'Wake up modem
+			Call Signalquality
+			If flag(1)=TRUE Then
+				Call SBD_session
+			EndIf
+			PortSet(4,0) 'Sleep modem
+			Delay(0,5,sec)
+			
+		EndIf
+
+	NextScan
+EndProg

@@ -50,13 +50,13 @@ def modemT(mode=false,type="fox"):
 	#Generic switch off for 30 seconds.
 	print 'Modem OFF'
 	case type=="fox": #Add cases for other devices...
-		fox.Pin('J7.35','low') #Using a Fox Board as host with GPIO controlled power
+		fox.Pin('J7.35','low') #For mk3 satice PCB with Fox Board microP unit
     time.sleep(30) #required to discharge charge pump on the modem, according to manufacturer.
 	
 	if mode==true: 
 		print 'Modem ON'
 		case type=="fox":
-			fox.Pin('J7.35','high') #For mk3 satice PCB only compatible with data modems.
+			fox.Pin('J7.35','high') #For mk3 satice PCB with Fox Board microP unit
 		time.sleep(5)
 	
 
@@ -102,7 +102,8 @@ def connect(device):
         False: AT response was not possible
         ser: serial socket for python
     """
-    # Open serial socket to device
+    # Open serial socket to device, baudrate may change. 
+	# Default on the modems is 19200, you can check it with AT+CBST? 
     ser = serial.Serial(port=device,baudrate=19200)
     if ser.isOpen()== False:
         return False
@@ -128,14 +129,18 @@ def writeMod(ser,frase,wait=1):
     Output: 
         False: AT response was not possible
 	Default call: writeMod(ser,frase);
+	
+	***-> Need feedback about the encoding stuff, is it really necessary? 
 	"""
 	#By default wait time is 1 second
     ser.write(frase)
+	#ser.write(bytes(frase, encoding="UTF-8"))
     out = ''
     # let's wait 'espera' second before reading output (let's give device time to answer)
     time.sleep(wait)
     while ser.inWaiting() > 0:
         out += ser.read(1)
+		#out = ser.read(ser.inWaiting()).decode(encoding='UTF-8')
     if out == '':
         return 'No answer'
     else:
@@ -145,8 +150,7 @@ def writeMod(ser,frase,wait=1):
         out_ = out.split('\r\n')
         return out_[2]#The order is \r\nIssuedComm\r\nanswer\r\nblank\r\nok\r\n !!!!
 		
-
-def query(ser,phrase='AT\r\n',splitch=','): 
+def query(ser,phrase='AT\r\n',splitch=''): 
      """
 	This function issues an AT command through a serial port,
 	waits for an answer and splits the string output through a split
@@ -154,7 +158,7 @@ def query(ser,phrase='AT\r\n',splitch=','):
     Compatible with SBD and data modems
     Input: 	Serial port to connect
 			AT command to be issued, default is 'AT' with carriage return
-			Split character f.i.(';'..','..':'), default is ','
+			Split character f.i.(';'..','..':'), default is not used
     Output: 
         answer: first grade decoded answer, may need further split if answer
 		is a vector of status codes.
@@ -166,16 +170,24 @@ def query(ser,phrase='AT\r\n',splitch=','):
     answer = writeMod(ser,phrase,tao)
 	# DECODE SUBROUTINE??? like answer=decode(answer)
 	# get answer from escape command +++, command to get again in data mode...
-    if answer != 'No answer\n':
+    if answer != 'No answer\n':  
       if (phrase=='AT\r\n') or splitch='': #Self explanatory, anyway answer for command "AT"
         answer= answer.split(splitch)[0]
       else:       #Case I want the answer for any other command
         answer= answer.split(splitch)[1] #Using splitch as division character, I take the second field
-    return answer
+	#*****************************
+	# More elegant solution?
+	# (answer != 'No answer\n') and (answer != 'OK\n'): 
+    #    answer= answer.split(splitch)[1] #Using splitch as division character, I take the second field
+	# else: 
+    #    answer= answer.split(splitch)[0]
+	#****************************
+ return answer
 
-def noFlowControl(ser):
+	
+def dFlowC(ser):
     """
-	Disables flow control on the modem
+	Disables flow control (RTS/CTS) on the modem
 	Supported on 9522B and 9602, it is recommended to use flow control.
 	Seems that this functionallity was added posterior to the design of the modems
 	as a backwards compatibility functionality, seems to be pretty flacky thus
@@ -186,9 +198,264 @@ def noFlowControl(ser):
         Modem answer
     """
     frase = 'AT&K0\r\n'
-    respuesta = query(ser,frase,"")
-    return respuesta
+    answer = query(ser,frase,"")
+	#if answer=='OK\n':
+	#	print "Flow control (RTS/CTS) dissabled" #Uncomment for debug	
+	return answer
 
+	
+def rFS(ser):
+    """
+    Restore factory settings. 
+    Input: 
+        ser: Serial socket
+    Output:
+        Modem answer
+	"""
+    frase = 'AT&F0\r\n'
+    answer = query(ser,frase,"")
+	#if answer=='OK\n':
+	#	print "Factory settings restored" #Uncomment for debug
+    return answer
+
+def dDTR(ser):
+    """
+    Disable DTR. 
+    Input: 
+        ser: Serial socket
+    Output:
+        Modem answer
+    """
+    frase = 'AT&D0\r\n'
+    answer = query(ser,frase,"")
+	#if answer=='OK\n':
+	#	print "DTR dissabled" #Uncomment for debug
+    return answer
+
+def nR(ser,ringNumber = 1):
+    """
+	Sets the number of rings before answering
+    Input: 
+        ser: Serial socket
+		ringNumber: number of rings, default 1
+    Output:
+        Modem answer
+    """
+    frase = 'ATS0 = {}\r\n'.format(ringNumber)
+    answer = query(ser,frase,"")
+	#if answer=='OK\n':
+	#	print "Rings before answering set to {} ring(s)".format(ringNumber) #Uncomment for debug
+    return answer
+
+def sAcP(ser):
+    """
+    Saves current setup as active profile
+    Input: 
+        ser: Serial socket
+    Output:
+        Modem answer
+    """
+    frase = 'AT&W0\r\n' #Saves as profile 0
+    answer = query(ser,frase,"")
+	if answer=='OK\n':
+		frase = 'AT&Y0\r\n' #Saves profile 0 as power-up default
+    answer = query(ser,frase,"")
+	#if answer=='OK\n':
+	#	print "Saved setup as profile 0 and power up default setup" #Uncomment for debug
+    return answer
+    
+def iSSet(ser):
+    """
+    Used with data modems on Satice, initial setup of the modem
+    Input: 
+        ser: Serial socket
+    Output:
+        boolean answer, true for success false for not succesfull.
+    """
+	#more elegant if I change output of answers in those particular cases to boolean:
+	#if (rFS(ser) && dDTR(ser) && dFlowC(ser) && nR(ser) && sAcP(ser)): true
+	#else return false
+	
+    answer = rFS(ser)
+    if answer != 'OK':
+        return False
+    answer = dDTR(ser)
+    if answer != 'OK':
+        return False
+    answer = dFlowC(ser)
+    if answer != 'OK':
+        return False
+    answer = nR(ser)
+    if answer != 'OK':
+        return False
+    answer = sAcP(ser)
+    if answer != 'OK':
+        return False
+    
+    return True
+	
+def dSIMr(answer,mode="data"):
+    """
+    Decodes output from AT+CREG? command, useful for debug or log
+    Input:
+        answer: int con la info a decodificar
+		mode: data / sbd...
+    Output: 
+        Returns the meaning of the code in an ASCII string
+    """
+	if mode=="sbd" or mode=="SBD":
+		if answer == 0:
+			return 'ISU Detached.'
+		elif answer == 1:
+			return 'ISU attached but not registered, bad location.'
+		elif answer == 2:
+			return 'Registered, home network.'
+		elif answer == 3:
+			return 'Registration denied.'
+	if mode=="reg_err":
+		#Gateway reported
+		if answer == 0:
+			return 'No error.'
+		elif answer == 2:
+			return 'Session completed, Location Update not accepted'
+		elif (answer >= 3) and (answer <= 14):
+			return 'Reserved, Location Update failure.'
+		elif answer==15:
+			return 'Access is denied'
+		#ISU reported	
+		elif answer==16:
+			return 'ISU has been locked and may not make SBD calls (see +CULK command).'
+		elif answer==17:		
+			return 'Gateway not responding (local session timeout).'
+		elif answer==18:		
+			return 'Connection lost (RF drop).'
+		elif answer==19:
+			return 'Link failure (A protocol error caused termination of the call).'
+		elif ((answer >= 20) and (answer <= 31)) or ((answer >= 39) and (answer <= 63)): 
+			return 'Reserved, but indicate failure if used.'
+		elif answer==32:			
+			return 'No network service, unable to initiate call.'
+		elif answer==33:				
+			return 'Antenna fault, unable to initiate call.'
+		elif answer==34:	
+			return 'Radio is disabled, unable to initiate call (see *Rn command).'
+		elif answer==35:				
+			return 'ISU is busy, unable to initiate call.'
+		elif answer==36:	
+			return 'Try later, must wait 3 minutes since last registration.'
+		elif answer==37:	
+			return 'SBD service is temporarily disabled.'
+		elif answer==38:	
+			return 'Try later, traffic management period (see +SBDLOE command)'
+		elif answer==64:	
+			return 'Band violation (attempt to transmit outside permitted frequency band).'
+		elif answer==65:	
+			return 'PLL lock failure; hardware error during attempted transmit.'	
+	else :
+		if answer == 0:
+			return 'Not registered, ME is not currently searching a new operator to register to.'
+		elif answer == 1:
+			return 'Registered, home network'
+		elif answer == 2:
+			return 'Not registered, but ME is currently searching a new operator to register to.'
+		elif answer == 3:
+			return 'Registration denied.'
+		elif answer == 4:
+			return 'Unknown.'
+		elif answer == 5:
+			return 'Registered, roaming.'
+		
+def SIMr(ser,mode="data"):
+    """
+    Inquires about the status of the card
+    Input: 
+        ser: Serial socket
+		mode: data / sbd...
+    Output:
+        Modem answer: 0-5. Use dSIMr to decode meaning.
+    """
+	if mode=="sbd" or mode=="SBD":
+		answer= query(ser,'AT+SBDREG?\r\n',':')
+		#This would answer only with status code
+		
+		#UPDATE::
+		#+SBDREG[=<location>] means we can add location update instead of trusting the Iridium triangulation
+		#<location> has format: [+|-]DDMM.MMM,[+|-]dddmm.mmm , First field is latitude, second is longitude. (D)egrees(M)inutes.Thousandsof(M)inutes
+		#A user can send an MO SBD message and register at the same time by using the +SBDIX command	
+		#For example,
+			#AT+SBDIX=5212.483,-00007.350
+			#corresponds to 52 degrees 12.483 minutes North, 0 degrees 7.35 minutes Wes
+		#--->if location used within call a second code will be answered,reg_error
+		
+	else: answer = query(ser,'AT+CREG?\r\n',',')
+	#What happens if my answer is 'no answer?'
+    if answer == 'No answer': #In this case I consider not searching neither registered
+		answer = 0 
+    return answer
+	
+def ICCID(ser):
+    """
+	Checks for the Carrier Integrated Circuit Card IDentifier, defines the SIM card
+    Input: 
+        ser: Serial socket
+    Output:
+        Modem answer: the CICCID, f.i. 8988169312004****** 
+    """    
+	answer = query(ser,'AT+CICCID\r\n',':')
+    return answer
+
+def uSIMP(ser,pin = '1111'):
+    """
+    Unlocks SIM card with the Pin code
+    Input: 
+        ser: Serial socket
+        pin: Pin code, default 1111 in Irirdium cards
+    Output:
+         Modem answer: Usually OK or NO ANSWER.
+    """   
+    phrase = 'AT+CPIN="{}"\r\n'.format(pin)
+	answer = query(ser,phrase,'')
+	#answer= query(ser,phrase) #as I am expecting ok or no answer, this call should work (without splitch)
+	##########################
+	# I could just return a boolean, success or unsuccesful. Easier to work within the software
+	#out =false #default values
+	#if (answer==ok)
+	#	out=true
+	#return out
+	##########################
+    return answer
+	
+def dSIMP(ser,pin = '1111'):
+    """
+    Removes pin code requirement (disables pin code), current pin required.
+    Input: 
+        ser: Serial socket
+        pin: Current pin code: default 1111
+    Output:
+         Modem answer: Usually OK or NO ANSWER.
+    """
+    phrase = 'AT+CLCK="SC",0,"{}"\r\n'.format(pin)
+	answer = query(ser,phrase,'')
+	#Same thing as the one before, I could just return a boolean value to mark success.
+    return answer
+	
+def Dcall(ser,number):
+    """
+    Data call to Iridium phone. 
+    Input: 
+        ser: Serial socket
+        number: phone number, f.i. 8816765***** (note that to this number, voice channel would be 8816763*****)
+    Output:
+         Modem answer: Usually OK or NO ANSWER. In this case if call is succesful the modem will go into data mode.
+    """
+    phrase = 'ATDT{}\r\n'.format(number) 
+	#I usually used ATD+Number, seems you can use ATDTNumber or ATDNumber
+	#phrase = 'ATD +{}\r\n'.format(number) #We used this one with PPP setup
+	answer = query(ser,phrase,'')
+	#Same thing as the one before, I could just return a boolean value to mark success.
+	#Case I succed I'll be in data mode.
+    return answer
+	
 def sMSBD(ser,msg):
     """
     Sends a text message to the SBD modem's Mobile Originated buffer
@@ -200,40 +467,13 @@ def sMSBD(ser,msg):
         The modem answer, OK case succesful writting in SBD output buffer
 	"""
     frase = 'AT+SBDWT='+msg+'\r\n'
-    respuesta = query(ser,frase,"")
-    return respuesta
+    answer = query(ser,frase,"")
+    return answer
 	
-# W I P	
-	
-	# def writeSBD(ser,frase,espera):
-    # """
-    # Envia al modem un comando AT y espera su respuesta.
-    # Funcion para Modem 9522B y SBD.
-    # Input:
-        # ser: Variable con la conexión serie al modem Iridium
-        # frase: Comando AT a enviar
-        # espera: Tiempo de espera de la respuesta del modem
-    # Output: La respuesta del modem
-    # """
-    # ser.write(bytes(frase, encoding="UTF-8"))
-    # out = ''
-    # let's wait 'espera' second before reading output (let's give device time to answer)
-    # time.sleep(espera)
-    # if ser.inWaiting() > 0:
-        # out = ser.read(ser.inWaiting()).decode(encoding='UTF-8')
-    # if out == '':
-        # return 'No answer'
-    # else:
-     #   Esto hay que hacerlo porque el SBD devuelve primero lo que 
-    #    acabas de enviar, luego una linea en blanco y finalmente 
-   #     la respuesta
-  #      Despues vuelve a enviar una linea en blanco
- #       Despues un OK\r\n si todo va bien.
-#        En el caso de solo enviar un AT, la respuesta ya es el OK\r\n
-        # out_ = out.split('\r\n') 
-        # return out_[2]
-	
-
+	#Add binary bMSBD() with AT+SBDW=<message length>
+	#catch Ready as answer
+	#send binary data
+	#catch 0 answer for succesful write on output buffer
 	
 def coverageTest(ser,tout=300):
     """
@@ -251,17 +491,17 @@ def coverageTest(ser,tout=300):
     timeout = time.time() + tout   # By default 300s
     status=0
     while time.time()<timeout: #For 5 minutes
-      cobertura = query(ser,'AT+CSQ\r\n',':') #In this case query will return a number, 0 to 5.
-      if cobertura>3:
+      coverage = query(ser,'AT+CSQ\r\n',':') #In this case query will return a number, 0 to 5.
+      if coverage>3:
         print 'Coverage acceptable\n'
-        registro = query(ser,'AT+CREG?\r\n',',')#For CREG we will also have a number ranging 1 to 4.
-        if registro==1:
+		regCode = SIMr(ser)
+        #regCode = query(ser,'AT+CREG?\r\n',',') #For CREG we will also have a number ranging 1 to 4, does the same with a generic function		
+        if regCode==1:
           print 'SIM registered\n'
           #logME()
 		  status=1
-          break #Don't wait for the timeout
+          break #Don't wait for the timeout once we are registered
     return status
-
 def logME(type="coverage")
 	"""
 	logMe logs extended information among diverse operations on the subroutines.
@@ -277,8 +517,7 @@ def logME(type="coverage")
 		f = open('/home/satice/log/coverage.log','a')
 		f.write(now+' Registered with '+cobertura+' of coverage\n')
         f.close()
-	#same to be added for message transmited succesfully, through data, and for message received and transmited on SBD.
-		
+	#same to be added for message transmited succesfully, through data, and for message received and transmited on SBD.	
 def sbdMessage(input="nop")
 	"""
     Handles SBDI session, receives incomming message if available on the Mobile
@@ -296,26 +535,112 @@ def sbdMessage(input="nop")
 	#Here I should have a for i<10,i++, for i in range (0,10) does the trick
 	for i in range (0,10) #Ten tries
 		RXstr=query(ser,'AT+SBDI',':') #Returns something like "3,0,0,0,0,0" from "+SBDIX:3,0,0,0,0,0"
-		if len(RXstr)<8 : RXstr="3,0,0,0,0,0" #Double check that the answer is of desired length
-		RXfrags=str.split(',',5)
-		MO_Status=RXfrags[0] #review MO code 13, gateway reported  that the session did not complete for not entirely transfered msges
+		if len(RXstr)<8 : RXstr="3,0,0,0,0,0" #Double check that the answer is of desired length, othersiwe use a default output
+		RXfrags=RXstr.split(',',5)
+		#decodeStatusSBD(RXstr) #Uncomment to see definition of status messages
+		MO_Status=RXfrags[0] 
+		#review MO code 13, gateway reported  that the session did not complete for not entirely transfered msges
+		#If this happens, then 
 		MT_Status=RXfrags[2]
-		if MT_status >= 1 :
+		if MT_status == 1 : #Not sure I need ten tries if message is already in the MT buffer...
 			For i in range (0,10) #Ten tries
 				RXstr=query(ser,'AT+SBDRT',"*")#Read message
-				Delay(0,1,sec)
-				SerialIn(RXStr,ComME,6000,"!",RXBufSize)
-				SplitStr(RX_message,RXStr,"*!",2,5)	#Review, this is CR1k code!!!, essentially, command comes as *command*!. 
-				# First get up to !, then get through the *
-				If RX_Message(2) <> "" Then 
-					ExitFor
-				EndIf
-			Next
+				RX_message=RXstr.split('!') 
+				#This means I can receive multiple commands: f.i. RESET!LEFT!RIGHT!UP!SLEEP!...
+				#A decoding answer routine may be required to asign each command to a desired task
+				#Would I need to strip() all vector cells? case there are empty spaces inside?
+				
 		if MO_Status <=1 or input == 'nop': break #Case correctly sent or input message was 'nop' message
 		else : time.sleep(10) #wait 10 seconds... and try to send it again.
-				
+def decodeStatusSBD(answer,mode="X"):
+    """
+    Decode SBD status according to AT command reference manual, answer is already splited in RXfrags=RXstr.split(',',5),
+	being RXstr=query(ser,'AT+SBDI',':')
+    Input:
+        answer: code to be decoded 	<MO status>,<MOMSN>,<MT status>,<MTMSN>,<MT length>,<MT queued>
+		mode: default is X for eXtended (SBDIX output), use mode n,N or others for (SBDI output)
+	Output: 
+        Prints meaning of code
+    """
+	#Use of strip() to get rid of empty spaces inside the vector cells, shouldn't be necessary...
+	if mode!="X":
+		if answer[0].strip() == '0':
+			MOStatus = 'No SBD message to send from the ISU.'
+		if answer[0].strip() == '1':
+			MOStatus = 'SBD message successfully sent from the ISU to the GSS.'
+		if answer[0].strip() == '2':
+			MOStatus = 'An error occurred while attempting to send SBD message from ISU to GSS.'
+	else:
+		if answer[0].strip() == '0':
+			MOStatus = 'MO message, if any, transferred successfully.'
+		elif answer[0].strip() == '1':
+			MOStatus = 'MO message, if any, transferred successfully, but the MT message in the queue was too big to be transferred.'
+		elif answer[0].strip() == '2':
+			MOStatus = 'MO message, if any, transferred successfully, but the requested Location Update was not accepted.'
+		elif answer[0].strip() == '3' or answer[0] == '4':
+			MOStatus = 'Reserved, but indicate MO session success if used.'
+		elif answer[0].strip() == '5' or answer[0] == '6' or answer[0] == '7' or answer[0] == '8':
+			MOStatus = 'Reserved, but indicate MO session failure if used.'
+		elif answer[0].strip() == '10':
+			MOStatus = 'GSS reported that the call did not complete in the allowed time.'
+		elif answer[0].strip() == '11':
+			MOStatus = 'MO message queue at the GSS is full.'
+		elif answer[0].strip() == '12':
+			MOStatus = 'MO message has too many segments.'
+		elif answer[0].strip() == '13':
+			MOStatus = 'GSS reported that the session did not complete.'
+		elif answer[0].strip() == '14':
+			MOStatus = 'Invalid segment size.'
+		elif answer[0].strip() == '15':
+			MOStatus = 'Access is denied.'
+		elif answer[0].strip() == '16':
+			MOStatus = 'ISU has been locked and may not make SBD calls (see +CULK command).'
+		elif answer[0].strip() == '17':
+			MOStatus = 'Gateway not responding (local session timeout).'
+		elif answer[0].strip() == '18':
+			MOStatus = 'Connection lost (RF drop).'
+		elif answer[0].strip() == '19':
+			MOStatus = 'Link failure (A protocol error caused termination of the call).'
+		elif answer[0].strip() == '32':
+			MOStatus = 'No network service, unable to initiate call.'
+		elif answer[0].strip() == '33':
+			MOStatus = 'Antenna fault, unable to initiate call.'
+		elif answer[0].strip() == '34':
+			MOStatus = 'Radio is disabled, unable to initiate call (see *Rn command).'
+		elif answer[0].strip() == '35':
+			MOStatus = 'ISU is busy, unable to initiate call.'
+		elif answer[0].strip() == '36':
+			MOStatus = 'Try later, must wait 3 minutes since last registration.'
+		elif answer[0].strip() == '37':
+			MOStatus = 'SBD service is temporarily disabled.'
+		elif answer[0].strip() == '38':
+			MOStatus = 'Try later, traffic management period (see +SBDLOE command).'
+		elif answer[0].strip() == '64':
+			MOStatus = 'Band violation (attempt to transmit outside permitted frequency band).'
+		elif answer[0].strip() == '65':
+			MOStatus = 'PLL lock failure; hardware error during attempted transmit.'
+		else:
+			MOStatus = 'Reserved, but indicate failure if used.'
 			
-	
+	# This part is common to SBDI, SBDIX, SBDIXA
+	if answer[2].strip() == '0':
+		MTStatus = 'No new SBD message to be received from Iridium Network.'
+	elif answer[2].strip() == '1':
+		MTStatus = 'SBD message successfully received from Iridium Network.'
+	elif answer[2].strip() == '2':
+		MTStatus = 'An error occurred while attempting to perform a mailbox check or receive a message from the Iridium Network.'	
+	print('MO status:',MOStatus)  
+    print('MOMSN:',answer[1].strip())
+    print('MT status:',MTStatus)    
+    print('MTMSN:',answer[3].strip())
+    print('MT length:',answer[4].strip())
+    print('MT queued:',answer[5].strip())	
+
+#...>>>LOVRO LIBRARY -- > Handles file fetch, partition, naming conventions, hash code generation, outputs message to be transmitted
+#....>>> Transmitted message -- > f.i. filenameEXTxxYY.DATA.Checksum
+#....>>> Need to be sure the separation between name field, data and checksum cannot be repeated inside data (. is too generic, use something like a "wink sequence" :D;D:D )
+#...>>>Receives acknoledgment encoded, f.i. ACKfilenameEXTxxYY being xx number of chunk out of total yy parts.
+#...>>>Processes stacks of output files, removes the ones succesfully transmitted, adds new files...
 	
 def nextfile():
   #Takes the first file out of a list command on the shortlist
